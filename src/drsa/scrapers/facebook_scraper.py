@@ -75,6 +75,12 @@ class BaseScraper(object):
             self._api = api
         return self._api
 
+    def dump_resumefile(self, objid, url=None):
+        faildata = json.dumps({'objid': objid, 'url': url})
+        logger.error('Failure at %s. Resumefile dumped' % faildata)
+        open('resumefile.json', 'w').write(faildata)
+       
+
     def walk(self, result):
         for d in result['data']:
             yield d
@@ -83,26 +89,48 @@ class BaseScraper(object):
             url = result['paging'].get('next', None)
             if url is None:
                 return
-            logging.info('%s: Next page: %s' % (self.__class__.__name__, url))
+            logger.info('%s: Next page: %s' % (self.__class__.__name__, url))
             try:
                 data = requests.get(url).json()
             except:
-                faildata = json.dumps({'objid': self._objid, 'url': url})
-                logger.error('Failure at %s' % faildata)
+                self.dump_resumefile(self._objid, url)
                 traceback.print_exc()
-                open('resumefile.json', 'w').write(faildata)
-                raise Exception(faildata)
+                raise
+            if data.has_key('error'):
+                logger.error('%s: Error encountered at %s' % (
+                            (self.__class__.__name__, url)))
+                self.dump_resumefile(self._objid, url)
+                raise Exception('Unknown Error : %s' % json.dumps(data))
             for d in self.walk(data):
                 yield d
 
     def run(self):
-        logging.info("[%s] Crawling %s/%s" % (self.__class__.__name__, 
+        logger.info("%s: Crawling %s/%s" % (self.__class__.__name__, 
                         self.graph_url, self._objid))
+        resume_url = None
         if self._resume_url:
             result = requests.get(self._resume_url).json()
+            resume_url = self._resume_url
             self._resume_url = None
         else:
-            result = self.query()
+            try:
+                result = self.query()
+            except:
+                self.dump_resumefile(self._objid)
+                traceback.print_exc()
+                raise 
+
+        if result.has_key('error'):
+            if resume_url:
+                logger.error('%s: Error encountered at %s' % (
+                                self.__class__.__name__, resume_url))
+                self.dump_resumefile(self._objid, resume_url)
+            else:
+                logger.error('%s: Error encountered at %s/%s' % (
+                            (self.__class__.__name__, self.graph_url, self._objid)))
+                self.dump_resumefile(self._objid)
+            raise Exception('Unknown Error : %s' % json.dumps(result))
+
         for d in self.walk(result):
             extended_data = self.extend_data(d)
             self.store.write(extended_data)
@@ -121,7 +149,7 @@ class PostScraper(BaseScraper):
         'shares',
     ]
 
-    _storefile = 'posts.json'
+    _storefile = 'posts.ldjson'
 
     def query(self):
         return self.api.get_connections(self._objid, 'posts',
@@ -133,7 +161,7 @@ class PostScraper(BaseScraper):
 
 class CommentScraper(BaseScraper):
 
-    _storefile = 'comments.json'
+    _storefile = 'comments.ldjson'
 
     _fields = [
         'message',
@@ -150,6 +178,64 @@ class CommentScraper(BaseScraper):
         data['post_id'] = self._objid
         return data
 
+class LikeScraper(BaseScraper):
+
+    _storefile = 'likes.ldjson'
+
+    def query(self):
+        return self.api.get_connections(self._objid, 'likes', limit=LIMIT)
+
+    def extend_data(self, data):
+        data['post_id'] = self._objid
+        return data
+
+
+class PostIterator(object):
+
+    def __init__(self, config, postsdb, resumefile, scraper, type):
+        conf = ConfigParser()
+        conf.readfp(open(config))
+        self._conf = conf
+        self._postsdb = postsdb
+        self._resumefile = resumefile
+        self._scraper = scraper
+        self._type = type
+
+    def run(self):
+        resumefile = self._resumefile
+        postsdb = self._postsdb
+
+        if resumefile is not None:
+            resumedata = json.loads(open(resumefile).read())
+            resume_url = resumedata['url']
+            resume_post = resumedata['objid']
+            start = False
+            for data in open(postsdb):
+                post = json.loads(data)
+                if (post['id'] == resume_post) and not start:
+                    start = True
+                    if resume_url:
+                        logger.info('Resuming: %s' % resume_url)
+                    else:
+                        logger.info('Resuming fom PostID: %s' % post['id'])
+                if not start:
+                    logger.info('Skipping PostID: %s' % post['id'])
+                    continue
+                logger.info('Scraping %s for PostID: %s' % (self._type,
+                                                            post['id']))
+                scraper = self._scraper(self._conf, post['id'], resume_url)
+                resume_post = None
+                resume_url = None
+                scraper.run()
+        else:
+            for data in open(postsdb):
+                post = json.loads(data)
+                logger.info('Scraping %s for PostID: %s' % (self._type,
+                                                            post['id']))
+                scraper = self._scraper(self._conf, post['id'])
+                scraper.run()
+
+
 @argh.arg('config', help='Config File')
 @argh.arg('pageid', help='Page ID')
 def posts(config, pageid):
@@ -163,35 +249,21 @@ def posts(config, pageid):
 @argh.arg('postsdb', help='Posts database')
 @argh.arg('-r', '--resumefile', help='Resume file', default=None)
 def comments(config, postsdb, resumefile=None):
-    conf = ConfigParser()
-    conf.readfp(open(config))
+    iterator = PostIterator(config, postsdb, resumefile, 
+                            CommentScraper, 'comments')
+    iterator.run()
 
-    if resumefile is not None:
-        resumedata = json.loads(open(resumefile).read())
-        resume_url = resumedata['url']
-        resume_post = resumedata['objid']
-        start = False
-        for data in open(postsdb):
-            post = json.loads(data)
-            if resume_url and (post['id'] == resume_post) and not start:
-                start = True
-                logger.info('Resuming: %s' % resume_url)
-            if not start:
-                logger.info('Skipping PostID: %s' % post['id'])
-                continue
-            logger.info('Scraping comments for PostID: %s' % post['id'])
-            scraper = CommentScraper(conf, post['id'], resume_url)
-            resume_url = None
-            scraper.run()
-    else:
-        for data in open(postsdb):
-            post = json.loads(data)
-            logger.info('Scraping comments for PostID: %s' % post['id'])
-            scraper = CommentScraper(conf, post['id'])
-            scraper.run()
-    
+
+@argh.arg('config', help='Config File')
+@argh.arg('postsdb', help='Posts database')
+@argh.arg('-r', '--resumefile', help='Resume file', default=None)
+def likes(config, postsdb, resumefile=None):
+    iterator = PostIterator(config, postsdb, resumefile, 
+                            LikeScraper, 'likes')
+    iterator.run()
+
 parser = argh.ArghParser()
-parser.add_commands([posts, comments])
+parser.add_commands([posts, comments, likes])
 
 def main():
     parser.dispatch()

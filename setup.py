@@ -38,12 +38,14 @@ setup(name='drsa.scrapers',
           'facebook-sdk',
           'argh',
           'requests[security]',
-          'sqlalchemy'
+          'sqlalchemy',
+          'scrapy'
           # -*- Extra requirements: -*-
       ],
       entry_points={
           'console_scripts': [
-              'facebook-scraper=drsa.scrapers.facebook_scraper:main'
+              'facebook-scraper=drsa.scrapers.facebook_scraper:main',
+              'bharian-scraper=drsa.scrapers.bharian_scraper:main'
            ]
       }
       )
