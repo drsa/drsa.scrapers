@@ -39,6 +39,8 @@ setup(name='drsa.scrapers',
           'argh',
           'requests[security]',
           'sqlalchemy',
+          'psycopg2',
+          'mysql-python',
           'scrapy'
           # -*- Extra requirements: -*-
       ],
